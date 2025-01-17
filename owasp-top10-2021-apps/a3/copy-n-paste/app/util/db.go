@@ -46,20 +46,19 @@ func AuthenticateUser(user string, pass string) (bool, error) {
 	}
 	defer dbConn.Close()
 
-	query := fmt.Sprint("select * from Users where username = '" + user + "'")
-	rows, err := dbConn.Query(query)
+	query := "SELECT id, username, password FROM Users WHERE username = ?" //uso de um placeholder ?
+	row := dbConn.QueryRow(query, user) //retorna uma linha do db com base no que foi consultado
+
+	loginAttempt := types.LoginAttempt{} //preenche os campos da tentativa de login com os valores retornados pela linha
+	err = row.Scan(&loginAttempt.ID, &loginAttempt.User, &loginAttempt.Pass)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil // No user found
+		}
 		return false, err
 	}
-	defer rows.Close()
-	loginAttempt := types.LoginAttempt{}
-	for rows.Next() {
-		err := rows.Scan(&loginAttempt.ID, &loginAttempt.User, &loginAttempt.Pass)
-		if err != nil {
-			return false, err
-		}
-	}
-	if hash.CheckPasswordHash(pass, loginAttempt.Pass) {
+
+	if hash.CheckPasswordHash(pass, loginAttempt.Pass) { //utiliza hashing para comparar a senha fornecida com o hash armazenado no banco
 		return true, nil
 	}
 	return false, nil
@@ -70,14 +69,16 @@ func NewUser(user string, pass string, passcheck string) (bool, error) {
 	if user == "" || pass == "" || passcheck == "" {
 		return false, errors.New("All fields are required")
 	}
+	if pass != passcheck { //tratando erro no caso das senhas não coincidirem
+		return false, errors.New("Passwords do not match")
+	}
+
 	userExists, err := CheckIfUserExists(user)
 	if userExists {
-		return false, err //user already exists
+		return false, errors.New("User already exists")
 	}
-	if pass != passcheck {
-		return false, err //passwords different
-	}
-	passHash, err := hash.HashPassword(pass)
+
+	passHash, err := hash.HashPassword(pass) //evita que senhas sejam armazenas em texto claro
 	if err != nil {
 		return false, err
 	}
@@ -88,55 +89,56 @@ func NewUser(user string, pass string, passcheck string) (bool, error) {
 	}
 	defer dbConn.Close()
 
-	query := fmt.Sprint("insert into Users (username, password) values ('" + user + "', '" + passHash + "')")
-	rows, err := dbConn.Query(query)
+	query := "INSERT INTO Users (username, password) VALUES (?, ?)"
+	_, err = dbConn.Exec(query, user, passHash)
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
 
 	fmt.Println("User created: ", user)
-	return true, nil //user created
+	return true, nil
 }
 
 //CheckIfUserExists checks if there is an user with the given username on db
 func CheckIfUserExists(username string) (bool, error) {
-
 	dbConn, err := OpenDBConnection()
 	if err != nil {
 		return false, err
 	}
 	defer dbConn.Close()
 
-	query := fmt.Sprint("select username from Users where username = '" + username + "'")
-	rows, err := dbConn.Query(query)
+	query := "SELECT username FROM Users WHERE username = ?"
+	row := dbConn.QueryRow(query, username)
+
+	var foundUsername string
+	err = row.Scan(&foundUsername)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) { //caso nenhum registro seja encontrado, sem expor detalhes
+			return false, nil // No user found
+		}
 		return false, err
 	}
-	defer rows.Close()
 
-	if !rows.Next() {
-		return false, nil //invalid username
-	}
 	return true, nil
 }
 
 // InitDatabase initiates API Database by creating Users table.
 func InitDatabase() error {
-
 	dbConn, err := OpenDBConnection()
 	if err != nil {
-		errOpenDBConnection := fmt.Sprintf("OpenDBConnection error: %s", err)
-		return errors.New(errOpenDBConnection)
+		return fmt.Errorf("OpenDBConnection error: %w", err)
 	}
-
 	defer dbConn.Close()
 
-	queryCreate := fmt.Sprint("CREATE TABLE Users (ID int NOT NULL AUTO_INCREMENT, Username varchar(20), Password varchar(80), PRIMARY KEY (ID))")
+	queryCreate := `CREATE TABLE IF NOT EXISTS Users (
+		ID int NOT NULL AUTO_INCREMENT,
+		Username varchar(20),
+		Password varchar(80),
+		PRIMARY KEY (ID)
+	)`
 	_, err = dbConn.Exec(queryCreate)
 	if err != nil {
-		errInitDB := fmt.Sprintf("InitDatabase error: %s", err)
-		return errors.New(errInitDB)
+		return fmt.Errorf("InitDatabase error: %w", err)
 	}
 
 	return nil
